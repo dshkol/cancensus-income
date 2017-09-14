@@ -1,0 +1,122 @@
+---
+title: "Richer and Poorer"
+author: "Dmitry Shkolnik"
+date: "September 13, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Getting Census Data
+
+We retrieve Census data using the [**cancensus**](#about) R library. This library provides an interface to Statistics Canada Census data for 2016, 2011, and 2006. 
+
+```{r datasets, message=TRUE, warning=FALSE}
+library(cancensus)
+
+# Get dataset codes for different census products
+list_census_datasets()
+```
+
+Select all current Canadian census metropolitan agglomerations. We can use a built-in function for searching and selecting Canadian census regions. We want to filter to select only CMA level geography for this analysis.
+
+```{r regions, message=FALSE}
+cma <- list_census_regions("CA16") %>% 
+  filter(level=='CMA')
+cma
+```
+
+Another auxiliary function `as_census_region_list` takes a subset of regions and stores as a region_list object for easy use in subsequent queries.
+
+```{r aslist}
+cma_list <- cma %>% as_census_region_list
+cma_list
+```
+
+Raw census data has thousands of variables across deeply nested parent/child hierarchies. In this case, we are solely interested in full-time, full-year (FTFY) median incomes. We can search for strings in variable labels and descriptions to find the codes for the variable we need using `search_census_vectors("text","dataset"). 
+
+```{r varsearch11, message=FALSE}
+vectors11 <- search_census_vectors("income","CA11")
+vectors11
+```
+We're interested in median total income for individuals so the variable we want to extract here is `v_CA11N_2341`.
+
+We run the search twice, once for the 2011 dataset and once for the 2016 dataset as they may have different variable coding and structure. 
+
+```{r varsearch16, message=FALSE}
+vectors16 <- search_census_vectors("income","CA16")
+vectors16
+```
+The variable we want for the 2016 data is `v_CA16_2207`.
+
+## Changes in Income, 2011-2016
+
+Once we have identified the right variables, getting the data is very straightforward.
+
+```{r getdata, message=FALSE}
+inc11 <- get_census(dataset = "CA11", regions = cma_list, vectors = "v_CA11N_2341",level = "CMA", geo_format = NA, labels = "short")
+head(inc11)
+inc16 <- get_census(dataset = "CA16", regions = cma_list, vectors = "v_CA16_2207",level = "CMA", geo_format = NA, labels = "short")
+head(inc16)
+```
+
+Any fair comparison between 2011 and 2016 Census income data requires an additional adjustment for inflation. The 2011 data was collected in May 2010, while the 2016 data was colleted in May 2016. The Bank of Canada provides data for [monthly Consumer Price Indeces](http://www.bankofcanada.ca/rates/price-indexes/cpi/). Based on this we see that the CPI for May 2010 was 116.3 (where 2002 = 100), and 126.9 for May 2015. We use these values to create an adjustment to the 2011 figures to make them more comparable. 
+
+```{r cpi}
+cpi2010 <- 116.3
+cpi2015 <- 126.9
+cpi_adj <- cpi2015/cpi2010
+inc11 <- inc11 %>% mutate(median_income_adj = v_CA11N_2341 * cpi_adj)
+```
+
+Combining the two datasets we can start making comparisons across Census periods. In addition, we want to clean up the CMA variable text to keep just the name, remove the two new CMAs that are not possible to make a comparison for (Grande Prairie and Wood Buffalo), and generate a trend (positive or negative) that reflects whether incomes, adjusted for inflation, have increased or decreased in that CMA. 
+
+```{r combine}
+inc <- inc11 %>% 
+  inner_join(inc16, by = "GeoUID", suffix = c("2011","2016")) %>%
+  select(GeoUID, CMA = `Region Name2011`, inc2011 = v_CA11N_2341,inc2011_adj = median_income_adj, inc2016 = v_CA16_2207) %>%
+  filter(!is.na(inc2011)) %>%
+  mutate(CMA = as.factor(gsub(" \\(.\\)","", CMA)))
+
+inc$trend <- ifelse(inc$inc2016 >= inc$inc2011_adj, "Positive","Negative")
+
+```
+It can be difficult to visually comunicate changes in variables when you have this many factors. As we're interested primarily two things: the difference between Census period and the relative income between CMAs, an effective visualization would prioritize information space for those two properties. Barbell plots do just this, and are easy to generate using the `ggplot2` and an additional CRAN package called `ggalt` which provides additional geoms like barbells - [among several others](https://cran.r-project.org/web/packages/ggalt/vignettes/ggalt_examples.html). 
+
+```{r barbell-cma}
+# install.packages("ggalt")
+library(ggplot2)
+library(ggalt)
+ggplot(inc, aes(y = CMA, x= inc2011_adj, xend = inc2016)) + 
+  geom_dumbbell(size = 1.25, color = "#80cdc1",
+                colour_x = "#a6611a", colour_xend = "#018571",
+                size_x = 2.25, size_xend = 2,
+                dot_guide = TRUE, dot_guide_size = 0.10,
+                show.legend = TRUE) + 
+  geom_dumbbell(data = inc[inc$trend == "Negative",], aes(y = CMA, x= inc2011_adj, xend = inc2016),
+                size = 1.25, color = "#dfc27d",
+                colour_x = "#a6611a", colour_xend = "#018571",
+                size_x = 2.25, size_xend = 2,
+                dot_guide = TRUE, dot_guide_size = 0.10,
+                show.legend = TRUE) + 
+  scale_y_discrete(name="", limits = rev(levels(inc$CMA))) +
+  scale_x_continuous("Median individual income (May 2015 constant dollars)") + 
+  labs(title = "Median Individual Total Income, Census 2011 and 2016 by CMA") +
+  theme_minimal()
+
+```
+
+We see that incomes have in just about every Canadian CMA by varying amounts. There are notable exceptions, however, in Toronto and Ottawa - Gatineau, which saw declines between the two Census periods. 
+
+Let's take a closer look at some CMAs.
+
+## About cancensus {#about}
+
+This analysis uses the **cancensus** R package developed by [Jens von Bergmann](https://github.com/mountainMath), [Aaron Jacobs](https://github.com/atheriel), and [myself](https://github.com/dshkol) to access Canadian Census data. We hope to have **cancensus** available via CRAN in the near future, but in the meantime you can install it directly off of Github. Additional information about how to get an API key, as well as other examples and demos are on the **cancensus** [Github page](https://github.com/mountainMath/cancensus). 
+
+```{r installation, eval=FALSE, warning=FALSE}
+devtools::install_github("mountainmath/cancensus")
+options(cancensus.api_key = "your_api_key")
+```
